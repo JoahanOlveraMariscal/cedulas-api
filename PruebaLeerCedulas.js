@@ -15,6 +15,8 @@ const LAUNCH_ARGS = [
   '--disable-gpu',
   '--single-process',
   '--no-zygote',
+  '--disable-web-security',
+  '--window-size=1280,900',
 ];
 
 async function launchBrowser() {
@@ -29,6 +31,7 @@ async function newPage(browser) {
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 900 },
   });
   const page = await context.newPage();
   page.setDefaultTimeout(SEL_TIMEOUT_MS);
@@ -39,16 +42,14 @@ async function newPage(browser) {
 async function navigateAndWait(page, url) {
   await page.goto(url, { timeout: NAV_TIMEOUT_MS }).catch(() => {});
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(() => {});
-  // Espera flexible: que exista cualquier input relevante en alguna frame
+  // Verifique que existan inputs relevantes en cualquier frame
   const ok = await waitAnySelectorInAnyFrame(page, [
     'input#nombre', 'input[formcontrolname="nombre"]',
     'input#primerApellido', 'input[formcontrolname="primerApellido"]',
     'input#segundoApellido', 'input[formcontrolname="segundoApellido"]',
     'input#curp', 'input[formcontrolname="curp"]'
   ], SEL_TIMEOUT_MS);
-  if (!ok) {
-    throw new Error('No se localizaron campos de búsqueda en la página (posible cambio de layout o bloqueo remoto).');
-  }
+  if (!ok) throw new Error('No se localizaron campos (posible cambio de layout o bloqueo remoto).');
 }
 
 // ======================= Utilidades multi-frame =======================
@@ -60,7 +61,7 @@ async function waitAnySelectorInAnyFrame(page, selectors, timeoutMs) {
         const loc = f.locator(sel);
         try {
           if (await loc.first().isVisible({ timeout: 250 })) return true;
-        } catch { /* continúa */ }
+        } catch {}
       }
     }
     await page.waitForTimeout(250);
@@ -73,7 +74,7 @@ async function getLocatorInAnyFrameByLabel(page, labelRegex) {
     const loc = f.getByLabel(labelRegex);
     try {
       if (await loc.first().isVisible({ timeout: 300 })) return loc.first();
-    } catch { /* sigue */ }
+    } catch {}
   }
   return null;
 }
@@ -83,7 +84,7 @@ async function getLocatorInAnyFrame(page, css) {
     const loc = f.locator(css);
     try {
       if (await loc.first().isVisible({ timeout: 300 })) return loc.first();
-    } catch { /* sigue */ }
+    } catch {}
   }
   return null;
 }
@@ -98,28 +99,25 @@ async function fillAny(page, labelText, css, value) {
 }
 
 async function clickBuscar(page) {
-  // Click “Buscar” en cualquier frame
   for (const f of page.frames()) {
     const btn = f.getByRole('button', { name: /buscar/i });
     try {
       if (await btn.isVisible({ timeout: 500 })) { await btn.click(); return true; }
-    } catch { /* sigue */ }
+    } catch {}
   }
-  // Fallback por texto
   for (const f of page.frames()) {
     const btn = f.locator('button:has-text("Buscar")');
     try {
       if (await btn.first().isVisible({ timeout: 500 })) { await btn.first().click(); return true; }
-    } catch { /* sigue */ }
+    } catch {}
   }
   return false;
 }
 
 async function collectRows(page) {
-  // Busca filas en cualquier frame
   for (const f of page.frames()) {
-    const hasRows = await f.locator('table tbody tr').count();
-    if (hasRows > 0) {
+    const n = await f.locator('table tbody tr').count();
+    if (n > 0) {
       const rows = await f.$$eval('table tbody tr', trs =>
         trs.map(r => {
           const t = Array.from(r.querySelectorAll('td')).map(td => (td.textContent || '').trim());
@@ -143,13 +141,36 @@ async function collectRows(page) {
   return [];
 }
 
+async function waitRowsInAnyFrame(page, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const f of page.frames()) {
+      if (await f.locator('table tbody tr').count() > 0) return true;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error('Timeout esperando filas de resultados.');
+}
+
+async function waitTextInAnyFrame(page, regex, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const f of page.frames()) {
+      try {
+        if (await f.getByText(regex).first().isVisible({ timeout: 250 })) return true;
+      } catch {}
+    }
+    await page.waitForTimeout(250);
+  }
+  return false;
+}
+
 // ======================= Endpoints =======================
 app.get('/inspect-campos', async (_req, res) => {
   const browser = await launchBrowser();
   const page = await newPage(browser);
   try {
     await navigateAndWait(page, 'https://cedulaprofesional.sep.gob.mx/');
-    // Inventario de inputs en todas las frames
     const frames = [];
     for (const f of page.frames()) {
       const inputs = await f.evaluate(() => {
@@ -173,23 +194,22 @@ app.get('/inspect-campos', async (_req, res) => {
   }
 });
 
-// Diagnóstico: screenshot + HTML parcial + frames
 app.get('/diag/snap', async (_req, res) => {
   const browser = await launchBrowser();
   const page = await newPage(browser);
   try {
     await page.goto('https://cedulaprofesional.sep.gob.mx/', { timeout: NAV_TIMEOUT_MS }).catch(()=>{});
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(()=>{});
-    const png = await page.screenshot({ fullPage: true });
-    const html = await page.content();
+    const png = await page.screenshot({ fullPage: true }).catch(()=>null);
+    const html = await page.content().catch(()=> '');
     const frames = page.frames().map(f => ({ url: f.url() }));
     res.json({
       ok: true,
       title: await page.title().catch(()=>null),
       url: page.url(),
-      htmlPreview: html.slice(0, 4000),
+      htmlPreview: (html || '').slice(0, 4000),
       frames,
-      screenshotBase64: Buffer.from(png).toString('base64'),
+      screenshotBase64: png ? Buffer.from(png).toString('base64') : null,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -198,11 +218,18 @@ app.get('/diag/snap', async (_req, res) => {
   }
 });
 
+app.get('/diag/httpbin', async (_req, res) => {
+  try {
+    const r = await fetch('https://httpbin.org/get', { cache: 'no-store' });
+    res.json({ ok: r.ok, status: r.status });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post('/consulta-cedula', async (req, res) => {
   const { nombre, paterno, materno, curp } = req.body || {};
-  if (!nombre && !curp) {
-    return res.status(400).json({ error: 'Proporcione al menos {nombre,paterno,materno} o {curp}.' });
-  }
+  if (!nombre && !curp) return res.status(400).json({ error: 'Proporcione al menos {nombre,paterno,materno} o {curp}.' });
 
   const browser = await launchBrowser();
   const page = await newPage(browser);
@@ -221,10 +248,9 @@ app.post('/consulta-cedula', async (req, res) => {
     const clicked = await clickBuscar(page);
     if (!clicked) throw new Error('No se pudo accionar el botón “Buscar”.');
 
-    // Espera: filas o mensaje de “sin resultados”
     const got = await Promise.race([
-      waitRowsInAnyFrame(page, 25000).then(() => true).catch(() => false),
-      waitTextInAnyFrame(page, /sin resultados|no se encontraron/i, 25000).then(() => false).catch(() => false),
+      waitRowsInAnyFrame(page, 30000).then(() => true).catch(() => false),
+      waitTextInAnyFrame(page, /sin resultados|no se encontraron/i, 30000).then(() => false).catch(() => false),
     ]);
 
     const queryObj = { nombre, paterno, materno, curp };
@@ -253,37 +279,7 @@ app.post('/consulta-cedula', async (req, res) => {
   }
 });
 
-// helpers extra
-async function waitRowsInAnyFrame(page, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    for (const f of page.frames()) {
-      if (await f.locator('table tbody tr').count() > 0) return true;
-    }
-    await page.waitForTimeout(250);
-  }
-  throw new Error('Timeout esperando filas de resultados.');
-}
-async function waitTextInAnyFrame(page, regex, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    for (const f of page.frames()) {
-      const found = await f.locator(`text=${regex.source}`).first().isVisible().catch(()=>false);
-      if (found) return true;
-    }
-    await page.waitForTimeout(250);
-  }
-  return false;
-}
-
-// Diagnóstico simple de salida a internet
-app.get('/diag/httpbin', async (_req, res) => {
-  try {
-    const r = await fetch('https://httpbin.org/get', { cache: 'no-store' });
-    res.json({ ok: r.ok, status: r.status });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
+app.get('/', (_req, res) => res.json({ ok: true, msg: 'cedulas-api up' }));
+app.use((req, res, next) => { res.setTimeout(180000); next(); });
 
 app.listen(process.env.PORT || 8080, () => console.log('Playwright listo'));
