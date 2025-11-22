@@ -6,8 +6,8 @@ const app = express();
 app.use(express.json());
 
 // ======================= Ajustes robustos para PaaS =======================
-const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS || 60000);
-const SEL_TIMEOUT_MS = Number(process.env.SEL_TIMEOUT_MS || 30000);
+const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS || 120000);
+const SEL_TIMEOUT_MS = Number(process.env.SEL_TIMEOUT_MS || 45000);
 const LAUNCH_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
@@ -37,41 +37,110 @@ async function newPage(browser) {
 }
 
 async function navigateAndWait(page, url) {
-  // Navegación “suave” y espera explícita de campos reales
   await page.goto(url, { timeout: NAV_TIMEOUT_MS }).catch(() => {});
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(() => {});
-  await page.waitForSelector(
-    'input#nombre, input[formcontrolname="nombre"], input#curp, input[formcontrolname="curp"]',
-    { timeout: SEL_TIMEOUT_MS }
-  );
+  // Espera flexible: que exista cualquier input relevante en alguna frame
+  const ok = await waitAnySelectorInAnyFrame(page, [
+    'input#nombre', 'input[formcontrolname="nombre"]',
+    'input#primerApellido', 'input[formcontrolname="primerApellido"]',
+    'input#segundoApellido', 'input[formcontrolname="segundoApellido"]',
+    'input#curp', 'input[formcontrolname="curp"]'
+  ], SEL_TIMEOUT_MS);
+  if (!ok) {
+    throw new Error('No se localizaron campos de búsqueda en la página (posible cambio de layout o bloqueo remoto).');
+  }
 }
 
-// ======================= Utilidades de scraping =======================
-async function listarInputs(page) {
-  const scrape = async frame => frame.evaluate(() => {
-    const vis = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-    return Array.from(document.querySelectorAll('input, select, textarea'))
-      .filter(vis)
-      .map(el => ({
-        tag: el.tagName.toLowerCase(),
-        type: el.getAttribute('type') || '',
-        id: el.id || '',
-        name: el.getAttribute('name') || '',
-        placeholder: el.getAttribute('placeholder') || '',
-        ariaLabel: el.getAttribute('aria-label') || '',
-        formcontrolname: el.getAttribute('formcontrolname') || '',
-        labelText: (() => {
-          const lbl = el.id && document.querySelector(`label[for="${el.id}"]`);
-          return lbl ? lbl.textContent.trim() : '';
-        })()
-      }));
-  });
-  const items = [{ frame: 'main', inputs: await scrape(page) }];
-  for (const f of page.frames()) {
-    if (f === page.mainFrame()) continue;
-    items.push({ frame: f.url(), inputs: await scrape(f) });
+// ======================= Utilidades multi-frame =======================
+async function waitAnySelectorInAnyFrame(page, selectors, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const f of page.frames()) {
+      for (const sel of selectors) {
+        const loc = f.locator(sel);
+        try {
+          if (await loc.first().isVisible({ timeout: 250 })) return true;
+        } catch { /* continúa */ }
+      }
+    }
+    await page.waitForTimeout(250);
   }
-  return items;
+  return false;
+}
+
+async function getLocatorInAnyFrameByLabel(page, labelRegex) {
+  for (const f of page.frames()) {
+    const loc = f.getByLabel(labelRegex);
+    try {
+      if (await loc.first().isVisible({ timeout: 300 })) return loc.first();
+    } catch { /* sigue */ }
+  }
+  return null;
+}
+
+async function getLocatorInAnyFrame(page, css) {
+  for (const f of page.frames()) {
+    const loc = f.locator(css);
+    try {
+      if (await loc.first().isVisible({ timeout: 300 })) return loc.first();
+    } catch { /* sigue */ }
+  }
+  return null;
+}
+
+async function fillAny(page, labelText, css, value) {
+  if (!value) return false;
+  const byLabel = await getLocatorInAnyFrameByLabel(page, new RegExp(labelText, 'i'));
+  if (byLabel) { await byLabel.fill(value); return true; }
+  const byCss = await getLocatorInAnyFrame(page, css);
+  if (byCss) { await byCss.fill(value); return true; }
+  return false;
+}
+
+async function clickBuscar(page) {
+  // Click “Buscar” en cualquier frame
+  for (const f of page.frames()) {
+    const btn = f.getByRole('button', { name: /buscar/i });
+    try {
+      if (await btn.isVisible({ timeout: 500 })) { await btn.click(); return true; }
+    } catch { /* sigue */ }
+  }
+  // Fallback por texto
+  for (const f of page.frames()) {
+    const btn = f.locator('button:has-text("Buscar")');
+    try {
+      if (await btn.first().isVisible({ timeout: 500 })) { await btn.first().click(); return true; }
+    } catch { /* sigue */ }
+  }
+  return false;
+}
+
+async function collectRows(page) {
+  // Busca filas en cualquier frame
+  for (const f of page.frames()) {
+    const hasRows = await f.locator('table tbody tr').count();
+    if (hasRows > 0) {
+      const rows = await f.$$eval('table tbody tr', trs =>
+        trs.map(r => {
+          const t = Array.from(r.querySelectorAll('td')).map(td => (td.textContent || '').trim());
+          return {
+            cedula: t[0] || '',
+            nombre: t[1] || '',
+            paterno: t[2] || '',
+            materno: t[3] || '',
+            carrera: t[6] || '',
+            universidad: t[5] || '',
+            entidad: t[7] || '',
+            anno: t[8] || '',
+            status: 0,
+            tipo: 'C1'
+          };
+        })
+      );
+      return rows;
+    }
+  }
+  return [];
 }
 
 // ======================= Endpoints =======================
@@ -80,8 +149,48 @@ app.get('/inspect-campos', async (_req, res) => {
   const page = await newPage(browser);
   try {
     await navigateAndWait(page, 'https://cedulaprofesional.sep.gob.mx/');
-    const mapa = await listarInputs(page);
-    res.json({ ok: true, frames: mapa });
+    // Inventario de inputs en todas las frames
+    const frames = [];
+    for (const f of page.frames()) {
+      const inputs = await f.evaluate(() => {
+        const vis = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+        return Array.from(document.querySelectorAll('input, select, textarea'))
+          .filter(vis)
+          .map(el => ({
+            tag: el.tagName.toLowerCase(),
+            id: el.id || '',
+            fcn: el.getAttribute('formcontrolname') || '',
+            ph: el.getAttribute('placeholder') || ''
+          }));
+      });
+      frames.push({ url: f.url(), inputs });
+    }
+    res.json({ ok: true, frames });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    await browser.close();
+  }
+});
+
+// Diagnóstico: screenshot + HTML parcial + frames
+app.get('/diag/snap', async (_req, res) => {
+  const browser = await launchBrowser();
+  const page = await newPage(browser);
+  try {
+    await page.goto('https://cedulaprofesional.sep.gob.mx/', { timeout: NAV_TIMEOUT_MS }).catch(()=>{});
+    await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(()=>{});
+    const png = await page.screenshot({ fullPage: true });
+    const html = await page.content();
+    const frames = page.frames().map(f => ({ url: f.url() }));
+    res.json({
+      ok: true,
+      title: await page.title().catch(()=>null),
+      url: page.url(),
+      htmlPreview: html.slice(0, 4000),
+      frames,
+      screenshotBase64: Buffer.from(png).toString('base64'),
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   } finally {
@@ -101,51 +210,27 @@ app.post('/consulta-cedula', async (req, res) => {
   try {
     await navigateAndWait(page, 'https://cedulaprofesional.sep.gob.mx/');
 
-    // Relleno por label con fallback a selectores estáticos
-    const fillIf = async (labelText, css, val) => {
-      if (!val) return;
-      try { await page.getByLabel(new RegExp(labelText, 'i')).fill(val); }
-      catch { await page.locator(css).fill(val); }
-    };
-
     if (curp) {
-      await fillIf('CURP', 'input#curp, input[formcontrolname="curp"]', curp);
+      await fillAny(page, 'CURP', 'input#curp, input[formcontrolname="curp"]', curp);
     } else {
-      await fillIf('Nombre\\(s\\)*', 'input#nombre, input[formcontrolname="nombre"]', nombre);
-      await fillIf('Primer Apellido', 'input#primerApellido, input[formcontrolname="primerApellido"]', paterno);
-      await fillIf('Segundo Apellido', 'input#segundoApellido, input[formcontrolname="segundoApellido"]', materno);
+      await fillAny(page, 'Nombre\\(s\\)*', 'input#nombre, input[formcontrolname="nombre"]', nombre);
+      await fillAny(page, 'Primer Apellido', 'input#primerApellido, input[formcontrolname="primerApellido"]', paterno);
+      await fillAny(page, 'Segundo Apellido', 'input#segundoApellido, input[formcontrolname="segundoApellido"]', materno);
     }
 
-    // Buscar y esperar resultados/“sin resultados”
-    await page.getByRole('button', { name: /buscar/i }).click();
-    const gotRows = await Promise.race([
-      page.waitForSelector('table tbody tr', { timeout: 25000 }).then(() => true).catch(() => false),
-      page.waitForSelector('text=/sin resultados|no se encontraron/i', { timeout: 25000 }).then(() => false).catch(() => false),
+    const clicked = await clickBuscar(page);
+    if (!clicked) throw new Error('No se pudo accionar el botón “Buscar”.');
+
+    // Espera: filas o mensaje de “sin resultados”
+    const got = await Promise.race([
+      waitRowsInAnyFrame(page, 25000).then(() => true).catch(() => false),
+      waitTextInAnyFrame(page, /sin resultados|no se encontraron/i, 25000).then(() => false).catch(() => false),
     ]);
 
     const queryObj = { nombre, paterno, materno, curp };
-    if (!gotRows) return res.json({ ok: true, query: queryObj, coincidencias: 0, resultados: [] });
+    if (!got) return res.json({ ok: true, query: queryObj, coincidencias: 0, resultados: [] });
 
-    // [Cédula, Nombre, Ap1, Ap2, Género, Institución, Profesión, Entidad, Año, Constancia]
-    const resultados = await page.$$eval('table tbody tr', rows =>
-      rows.map(r => {
-        const t = Array.from(r.querySelectorAll('td')).map(td => (td.textContent || '').trim());
-        return {
-          cedula: t[0] || '',
-          nombre: t[1] || '',
-          paterno: t[2] || '',
-          materno: t[3] || '',
-          carrera: t[6] || '',
-          universidad: t[5] || '',
-          entidad: t[7] || '',
-          anno: t[8] || '',
-          status: 0,
-          tipo: 'C1'
-        };
-      })
-    );
-
-    // Variables derivadas útiles
+    const resultados = await collectRows(page);
     const total = resultados.length;
     const primerRegistro = resultados[0] || null;
     const cedulas = resultados.map(r => r.cedula);
@@ -154,11 +239,13 @@ app.post('/consulta-cedula', async (req, res) => {
     const aniosNum = resultados.map(r => Number(String(r.anno).replace(/[^\d]/g, ''))).filter(Number.isFinite);
     const ultimoAnno = aniosNum.length ? Math.max(...aniosNum) : null;
 
-    if (String(req.query.only || '').toLowerCase() === 'vars') {
-      return res.json({ ok: true, query: queryObj, total, primerRegistro, cedulas, universidades, entidades, aniosNum, ultimoAnno });
-    }
-
-    res.json({ ok: true, query: queryObj, coincidencias: total, resumen: { total, primerRegistro, cedulas, universidades, entidades, aniosNum, ultimoAnno }, resultados });
+    res.json({
+      ok: true,
+      query: queryObj,
+      coincidencias: total,
+      resumen: { total, primerRegistro, cedulas, universidades, entidades, aniosNum, ultimoAnno },
+      resultados
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   } finally {
@@ -166,6 +253,30 @@ app.post('/consulta-cedula', async (req, res) => {
   }
 });
 
+// helpers extra
+async function waitRowsInAnyFrame(page, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const f of page.frames()) {
+      if (await f.locator('table tbody tr').count() > 0) return true;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error('Timeout esperando filas de resultados.');
+}
+async function waitTextInAnyFrame(page, regex, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const f of page.frames()) {
+      const found = await f.locator(`text=${regex.source}`).first().isVisible().catch(()=>false);
+      if (found) return true;
+    }
+    await page.waitForTimeout(250);
+  }
+  return false;
+}
+
+// Diagnóstico simple de salida a internet
 app.get('/diag/httpbin', async (_req, res) => {
   try {
     const r = await fetch('https://httpbin.org/get', { cache: 'no-store' });
