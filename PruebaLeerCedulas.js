@@ -1,30 +1,30 @@
 // package.json: { "type":"module", "dependencies": { "playwright":"^1.47.0", "express":"^4" } }
 import express from 'express';
-import { chromium } from 'playwright';
+import { firefox } from 'playwright';
 
 const app = express();
 app.use(express.json());
 
-// ======================= Ajustes robustos para PaaS =======================
-const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS || 120000);
-const SEL_TIMEOUT_MS = Number(process.env.SEL_TIMEOUT_MS || 45000);
+// ======================= Parámetros ajustables por ENV =======================
+const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS || 180000); // nav más laxo
+const SEL_TIMEOUT_MS = Number(process.env.SEL_TIMEOUT_MS || 90000);  // selectores más laxos
+const PORT           = Number(process.env.PORT || 8080);
+
 const LAUNCH_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
   '--disable-dev-shm-usage',
-  '--disable-gpu',
   '--single-process',
   '--no-zygote',
-  '--disable-web-security',
-  '--window-size=1280,900',
+  '--disable-gpu',
 ];
 
-async function launchBrowser() {
-  return chromium.launch({ headless: true, args: LAUNCH_ARGS });
-}
+// ======================= Navegador (pool simple) =======================
+const browserP = firefox.launch({ headless: true, args: LAUNCH_ARGS }); // una sola instancia
 
-async function newPage(browser) {
-  const context = await browser.newContext({
+async function newPage() {
+  const browser = await browserP;
+  const ctx = await browser.newContext({
     locale: 'es-MX',
     timezoneId: 'America/Mexico_City',
     ignoreHTTPSErrors: true,
@@ -33,23 +33,18 @@ async function newPage(browser) {
       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1280, height: 900 },
   });
-  const page = await context.newPage();
+  const page = await ctx.newPage();
   page.setDefaultTimeout(SEL_TIMEOUT_MS);
   page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
-  return page;
-}
 
-async function navigateAndWait(page, url) {
-  await page.goto(url, { timeout: NAV_TIMEOUT_MS }).catch(() => {});
-  await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(() => {});
-  // Verifique que existan inputs relevantes en cualquier frame
-  const ok = await waitAnySelectorInAnyFrame(page, [
-    'input#nombre', 'input[formcontrolname="nombre"]',
-    'input#primerApellido', 'input[formcontrolname="primerApellido"]',
-    'input#segundoApellido', 'input[formcontrolname="segundoApellido"]',
-    'input#curp', 'input[formcontrolname="curp"]'
-  ], SEL_TIMEOUT_MS);
-  if (!ok) throw new Error('No se localizaron campos (posible cambio de layout o bloqueo remoto).');
+  // Evitar descargas pesadas (fuentes, media)
+  await page.route('**/*', r => {
+    const url = r.request().url();
+    if (/\.(mp4|avi|m3u8|webm|mov|woff2?|ttf|otf)$/i.test(url)) return r.abort();
+    r.continue();
+  });
+
+  return { ctx, page };
 }
 
 // ======================= Utilidades multi-frame =======================
@@ -59,36 +54,27 @@ async function waitAnySelectorInAnyFrame(page, selectors, timeoutMs) {
     for (const f of page.frames()) {
       for (const sel of selectors) {
         const loc = f.locator(sel);
-        try {
-          if (await loc.first().isVisible({ timeout: 250 })) return true;
-        } catch {}
+        try { if (await loc.first().isVisible({ timeout: 250 })) return true; } catch {}
       }
     }
     await page.waitForTimeout(250);
   }
   return false;
 }
-
 async function getLocatorInAnyFrameByLabel(page, labelRegex) {
   for (const f of page.frames()) {
     const loc = f.getByLabel(labelRegex);
-    try {
-      if (await loc.first().isVisible({ timeout: 300 })) return loc.first();
-    } catch {}
+    try { if (await loc.first().isVisible({ timeout: 300 })) return loc.first(); } catch {}
   }
   return null;
 }
-
 async function getLocatorInAnyFrame(page, css) {
   for (const f of page.frames()) {
     const loc = f.locator(css);
-    try {
-      if (await loc.first().isVisible({ timeout: 300 })) return loc.first();
-    } catch {}
+    try { if (await loc.first().isVisible({ timeout: 300 })) return loc.first(); } catch {}
   }
   return null;
 }
-
 async function fillAny(page, labelText, css, value) {
   if (!value) return false;
   const byLabel = await getLocatorInAnyFrameByLabel(page, new RegExp(labelText, 'i'));
@@ -97,28 +83,42 @@ async function fillAny(page, labelText, css, value) {
   if (byCss) { await byCss.fill(value); return true; }
   return false;
 }
-
 async function clickBuscar(page) {
   for (const f of page.frames()) {
     const btn = f.getByRole('button', { name: /buscar/i });
-    try {
-      if (await btn.isVisible({ timeout: 500 })) { await btn.click(); return true; }
-    } catch {}
+    try { if (await btn.isVisible({ timeout: 500 })) { await btn.click(); return true; } } catch {}
   }
   for (const f of page.frames()) {
     const btn = f.locator('button:has-text("Buscar")');
-    try {
-      if (await btn.first().isVisible({ timeout: 500 })) { await btn.first().click(); return true; }
-    } catch {}
+    try { if (await btn.first().isVisible({ timeout: 500 })) { await btn.first().click(); return true; } } catch {}
   }
   return false;
 }
-
+async function waitRowsInAnyFrame(page, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const f of page.frames()) {
+      if (await f.locator('table tbody tr').count() > 0) return true;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error('Timeout esperando filas de resultados.');
+}
+async function waitTextInAnyFrame(page, regex, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const f of page.frames()) {
+      try { if (await f.getByText(regex).first().isVisible({ timeout: 250 })) return true; } catch {}
+    }
+    await page.waitForTimeout(250);
+  }
+  return false;
+}
 async function collectRows(page) {
   for (const f of page.frames()) {
     const n = await f.locator('table tbody tr').count();
     if (n > 0) {
-      const rows = await f.$$eval('table tbody tr', trs =>
+      return f.$$eval('table tbody tr', trs =>
         trs.map(r => {
           const t = Array.from(r.querySelectorAll('td')).map(td => (td.textContent || '').trim());
           return {
@@ -135,40 +135,27 @@ async function collectRows(page) {
           };
         })
       );
-      return rows;
     }
   }
   return [];
 }
 
-async function waitRowsInAnyFrame(page, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    for (const f of page.frames()) {
-      if (await f.locator('table tbody tr').count() > 0) return true;
-    }
-    await page.waitForTimeout(250);
-  }
-  throw new Error('Timeout esperando filas de resultados.');
-}
-
-async function waitTextInAnyFrame(page, regex, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    for (const f of page.frames()) {
-      try {
-        if (await f.getByText(regex).first().isVisible({ timeout: 250 })) return true;
-      } catch {}
-    }
-    await page.waitForTimeout(250);
-  }
-  return false;
+// ======================= Navegación robusta =======================
+async function navigateAndWait(page, url) {
+  await page.goto(url, { timeout: NAV_TIMEOUT_MS }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(() => {});
+  const ok = await waitAnySelectorInAnyFrame(page, [
+    'input#nombre', 'input[formcontrolname="nombre"]',
+    'input#primerApellido', 'input[formcontrolname="primerApellido"]',
+    'input#segundoApellido', 'input[formcontrolname="segundoApellido"]',
+    'input#curp', 'input[formcontrolname="curp"]'
+  ], SEL_TIMEOUT_MS);
+  if (!ok) throw new Error('No se localizaron campos (posible cambio de layout o bloqueo remoto).');
 }
 
 // ======================= Endpoints =======================
 app.get('/inspect-campos', async (_req, res) => {
-  const browser = await launchBrowser();
-  const page = await newPage(browser);
+  const { ctx, page } = await newPage();
   try {
     await navigateAndWait(page, 'https://cedulaprofesional.sep.gob.mx/');
     const frames = [];
@@ -189,18 +176,15 @@ app.get('/inspect-campos', async (_req, res) => {
     res.json({ ok: true, frames });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
-  } finally {
-    await browser.close();
-  }
+  } finally { await ctx.close(); }
 });
 
 app.get('/diag/snap', async (_req, res) => {
-  const browser = await launchBrowser();
-  const page = await newPage(browser);
+  const { ctx, page } = await newPage();
   try {
     await page.goto('https://cedulaprofesional.sep.gob.mx/', { timeout: NAV_TIMEOUT_MS }).catch(()=>{});
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(()=>{});
-    const png = await page.screenshot({ fullPage: true }).catch(()=>null);
+    const png  = await page.screenshot({ fullPage: true }).catch(()=>null);
     const html = await page.content().catch(()=> '');
     const frames = page.frames().map(f => ({ url: f.url() }));
     res.json({
@@ -213,9 +197,7 @@ app.get('/diag/snap', async (_req, res) => {
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
-  } finally {
-    await browser.close();
-  }
+  } finally { await ctx.close(); }
 });
 
 app.get('/diag/httpbin', async (_req, res) => {
@@ -231,9 +213,7 @@ app.post('/consulta-cedula', async (req, res) => {
   const { nombre, paterno, materno, curp } = req.body || {};
   if (!nombre && !curp) return res.status(400).json({ error: 'Proporcione al menos {nombre,paterno,materno} o {curp}.' });
 
-  const browser = await launchBrowser();
-  const page = await newPage(browser);
-
+  const { ctx, page } = await newPage();
   try {
     await navigateAndWait(page, 'https://cedulaprofesional.sep.gob.mx/');
 
@@ -249,8 +229,8 @@ app.post('/consulta-cedula', async (req, res) => {
     if (!clicked) throw new Error('No se pudo accionar el botón “Buscar”.');
 
     const got = await Promise.race([
-      waitRowsInAnyFrame(page, 30000).then(() => true).catch(() => false),
-      waitTextInAnyFrame(page, /sin resultados|no se encontraron/i, 30000).then(() => false).catch(() => false),
+      waitRowsInAnyFrame(page, 45000).then(() => true).catch(() => false),
+      waitTextInAnyFrame(page, /sin resultados|no se encontraron/i, 45000).then(() => false).catch(() => false),
     ]);
 
     const queryObj = { nombre, paterno, materno, curp };
@@ -274,12 +254,10 @@ app.post('/consulta-cedula', async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
-  } finally {
-    await browser.close();
-  }
+  } finally { await ctx.close(); }
 });
 
 app.get('/', (_req, res) => res.json({ ok: true, msg: 'cedulas-api up' }));
-app.use((req, res, next) => { res.setTimeout(180000); next(); });
+app.use((req, res, next) => { res.setTimeout(300000); next(); });
 
-app.listen(process.env.PORT || 8080, () => console.log('Playwright listo'));
+app.listen(PORT, () => console.log('Playwright listo en puerto', PORT));
