@@ -1,11 +1,14 @@
 FROM mcr.microsoft.com/playwright:v1.47.0-jammy
 WORKDIR /app
 
-# Copie package.json Y package-lock.json para permitir 'npm ci'
+# 1) Capas cacheables primero
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npx playwright install --with-deps
+RUN npm ci --omit=dev
 
-# Copie el resto del código
+# 2) Solo Chromium (evita ~2/3 del tiempo y del tamaño)
+RUN npx playwright install chromium --with-deps
+
+# 3) Copiar el resto del código
 COPY . .
 
 ENV NODE_ENV=production
