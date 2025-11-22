@@ -4,7 +4,7 @@
 #
 
 app = 'cedulas-api'
-primary_region = 'ams'
+primary_region = 'lax'
 
 [build]
 
