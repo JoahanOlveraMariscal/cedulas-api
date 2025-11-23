@@ -180,6 +180,16 @@ app.get('/diag/httpbin', async (_req, res) => {
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+app.get('/diag/fetch', async (req, res) => {
+  const url = req.query.url || 'https://cedulaprofesional.sep.gob.mx/';
+  try {
+    const r = await fetch(url, { redirect: 'manual' });
+    res.json({ ok: true, url, status: r.status, headers: Object.fromEntries(r.headers.entries()) });
+  } catch (e) {
+    res.status(500).json({ ok: false, url, error: String(e) });
+  }
+});
+
 app.get('/inspect-campos', async (_req, res) => {
   const { context, page } = await newPage();
   try {
@@ -226,12 +236,13 @@ app.get('/diag/snap', async (_req, res) => {
   } finally { await context.close(); }
 });
 
-app.get('/diag/self', async (_req,res) => {
+app.get('/diag/self', async (_req, res) => {
   try {
-    const { context, page } = await newPage();
-    const ua = await page.evaluate(()=>navigator.userAgent);
-    await context.close();
-    res.json({ ok: true, ua });
+    const { ctx, page } = await newPage();         // su helper actual
+    await page.goto('https://cedulaprofesional.sep.gob.mx/', { timeout: NAV_TIMEOUT_MS }).catch(()=>{});
+    const out = { url: page.url(), title: await page.title().catch(()=>null) };
+    await ctx.close();
+    res.json({ ok: true, ...out });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
