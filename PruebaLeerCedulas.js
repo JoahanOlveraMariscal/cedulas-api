@@ -257,6 +257,18 @@ app.post('/consulta-cedula', async (req, res) => {
   } finally { await ctx.close(); }
 });
 
+app.get('/diag/ping', (_req,res)=>res.json({ok:true, pid:process.pid, time:Date.now()}));
+
+app.get('/diag/self', async (_req,res)=>{
+  try{
+    const browser = await launchBrowser();
+    const { context, page } = await newPage(browser);
+    const ua = await page.evaluate(()=>navigator.userAgent);
+    await context.close(); await browser.close();
+    res.json({ok:true, ua});
+  }catch(e){ res.status(500).json({ok:false, error:String(e)}); }
+});
+
 app.get('/', (_req, res) => res.json({ ok: true, msg: 'cedulas-api up' }));
 app.use((req, res, next) => { res.setTimeout(300000); next(); });
 
