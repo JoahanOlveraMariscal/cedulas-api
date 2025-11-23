@@ -1,15 +1,19 @@
+// PruebaLeerCedulas.js
 // package.json: { "type":"module", "dependencies": { "playwright":"^1.47.0", "express":"^4" } }
+
 import express from 'express';
-import { chromium, firefox } from 'playwright';
+import { chromium } from 'playwright';
 
-const app = express();
-app.use(express.json());
+const app  = express();
+app.use(express.json({ limit: '1mb' }));
+app.set('trust proxy', 1);
 
-// ======================= Parámetros ajustables por ENV =======================
-const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS || 180000); // nav más laxo
-const SEL_TIMEOUT_MS = Number(process.env.SEL_TIMEOUT_MS || 90000);  // selectores más laxos
+// ======================= Parámetros por ENV =======================
+const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS || 180000);
+const SEL_TIMEOUT_MS = Number(process.env.SEL_TIMEOUT_MS || 90000);
 const PORT           = Number(process.env.PORT || 8080);
 
+// Flags seguros para PaaS (Render/Fly/Docker)
 const LAUNCH_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
@@ -17,44 +21,48 @@ const LAUNCH_ARGS = [
   '--single-process',
   '--no-zygote',
   '--disable-gpu',
+  '--disable-web-security',
+  '--window-size=1280,900',
 ];
 
 // ======================= Navegador (pool simple) =======================
-const browserP = firefox.launch({ headless: true, args: LAUNCH_ARGS }); // una sola instancia
-
-async function launchBrowser() {
-  return firefox.launch({ headless: true, args: LAUNCH_ARGS });
+// Una sola instancia de Chromium y múltiples contextos/páginas por solicitud.
+let browserPromise = null;
+async function ensureBrowser() {
+  if (!browserPromise) {
+    browserPromise = chromium.launch({ headless: true, args: LAUNCH_ARGS });
+  }
+  return browserPromise;
 }
 
+// Crea un nuevo contexto+página (y enruta descargas pesadas)
 async function newPage() {
-  const browser = await browserP;
-  const ctx = await browser.newContext({
+  const browser = await ensureBrowser();
+  const context = await browser.newContext({
     locale: 'es-MX',
     timezoneId: 'America/Mexico_City',
     ignoreHTTPSErrors: true,
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-      '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1280, height: 900 },
   });
-  const page = await ctx.newPage();
+  const page = await context.newPage();
   page.setDefaultTimeout(SEL_TIMEOUT_MS);
   page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
 
-  // Evitar descargas pesadas (fuentes, media)
+  // Evita recursos pesados innecesarios
   await page.route('**/*', r => {
     const url = r.request().url();
     if (/\.(mp4|avi|m3u8|webm|mov|woff2?|ttf|otf)$/i.test(url)) return r.abort();
     r.continue();
   });
 
-  return { ctx, page };
+  return { context, page };
 }
 
 // ======================= Utilidades multi-frame =======================
 async function waitAnySelectorInAnyFrame(page, selectors, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
     for (const f of page.frames()) {
       for (const sel of selectors) {
         const loc = f.locator(sel);
@@ -65,6 +73,7 @@ async function waitAnySelectorInAnyFrame(page, selectors, timeoutMs) {
   }
   return false;
 }
+
 async function getLocatorInAnyFrameByLabel(page, labelRegex) {
   for (const f of page.frames()) {
     const loc = f.getByLabel(labelRegex);
@@ -72,6 +81,7 @@ async function getLocatorInAnyFrameByLabel(page, labelRegex) {
   }
   return null;
 }
+
 async function getLocatorInAnyFrame(page, css) {
   for (const f of page.frames()) {
     const loc = f.locator(css);
@@ -79,6 +89,7 @@ async function getLocatorInAnyFrame(page, css) {
   }
   return null;
 }
+
 async function fillAny(page, labelText, css, value) {
   if (!value) return false;
   const byLabel = await getLocatorInAnyFrameByLabel(page, new RegExp(labelText, 'i'));
@@ -87,6 +98,7 @@ async function fillAny(page, labelText, css, value) {
   if (byCss) { await byCss.fill(value); return true; }
   return false;
 }
+
 async function clickBuscar(page) {
   for (const f of page.frames()) {
     const btn = f.getByRole('button', { name: /buscar/i });
@@ -98,9 +110,10 @@ async function clickBuscar(page) {
   }
   return false;
 }
+
 async function waitRowsInAnyFrame(page, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
     for (const f of page.frames()) {
       if (await f.locator('table tbody tr').count() > 0) return true;
     }
@@ -108,9 +121,10 @@ async function waitRowsInAnyFrame(page, timeoutMs) {
   }
   throw new Error('Timeout esperando filas de resultados.');
 }
+
 async function waitTextInAnyFrame(page, regex, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
     for (const f of page.frames()) {
       try { if (await f.getByText(regex).first().isVisible({ timeout: 250 })) return true; } catch {}
     }
@@ -118,6 +132,7 @@ async function waitTextInAnyFrame(page, regex, timeoutMs) {
   }
   return false;
 }
+
 async function collectRows(page) {
   for (const f of page.frames()) {
     const n = await f.locator('table tbody tr').count();
@@ -158,8 +173,15 @@ async function navigateAndWait(page, url) {
 }
 
 // ======================= Endpoints =======================
+app.get('/', (_req, res) => res.json({ ok: true, msg: 'cedulas-api up' }));
+app.get('/diag/ping', (_req, res) => res.json({ ok: true, pid: process.pid, ts: Date.now() }));
+app.get('/diag/httpbin', async (_req, res) => {
+  try { const r = await fetch('https://httpbin.org/get', { cache: 'no-store' }); res.json({ ok: r.ok, status: r.status }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get('/inspect-campos', async (_req, res) => {
-  const { ctx, page } = await newPage();
+  const { context, page } = await newPage();
   try {
     await navigateAndWait(page, 'https://cedulaprofesional.sep.gob.mx/');
     const frames = [];
@@ -180,11 +202,11 @@ app.get('/inspect-campos', async (_req, res) => {
     res.json({ ok: true, frames });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
-  } finally { await ctx.close(); }
+  } finally { await context.close(); }
 });
 
 app.get('/diag/snap', async (_req, res) => {
-  const { ctx, page } = await newPage();
+  const { context, page } = await newPage();
   try {
     await page.goto('https://cedulaprofesional.sep.gob.mx/', { timeout: NAV_TIMEOUT_MS }).catch(()=>{});
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(()=>{});
@@ -201,15 +223,17 @@ app.get('/diag/snap', async (_req, res) => {
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
-  } finally { await ctx.close(); }
+  } finally { await context.close(); }
 });
 
-app.get('/diag/httpbin', async (_req, res) => {
+app.get('/diag/self', async (_req,res) => {
   try {
-    const r = await fetch('https://httpbin.org/get', { cache: 'no-store' });
-    res.json({ ok: r.ok, status: r.status });
+    const { context, page } = await newPage();
+    const ua = await page.evaluate(()=>navigator.userAgent);
+    await context.close();
+    res.json({ ok: true, ua });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
@@ -217,7 +241,7 @@ app.post('/consulta-cedula', async (req, res) => {
   const { nombre, paterno, materno, curp } = req.body || {};
   if (!nombre && !curp) return res.status(400).json({ error: 'Proporcione al menos {nombre,paterno,materno} o {curp}.' });
 
-  const { ctx, page } = await newPage();
+  const { context, page } = await newPage();
   try {
     await navigateAndWait(page, 'https://cedulaprofesional.sep.gob.mx/');
 
@@ -258,22 +282,13 @@ app.post('/consulta-cedula', async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
-  } finally { await ctx.close(); }
+  } finally { await context.close(); }
 });
 
-app.get('/diag/ping', (_req,res)=>res.json({ok:true, pid:process.pid, time:Date.now()}));
-
-app.get('/diag/self', async (_req,res)=>{
-  try{
-    const browser = await launchBrowser();
-    const { context, page } = await newPage(browser);
-    const ua = await page.evaluate(()=>navigator.userAgent);
-    await context.close(); await browser.close();
-    res.json({ok:true, ua});
-  }catch(e){ res.status(500).json({ok:false, error:String(e)}); }
+// ======================= Arranque servidor =======================
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log('Playwright listo en puerto', PORT);
 });
-
-app.get('/', (_req, res) => res.json({ ok: true, msg: 'cedulas-api up' }));
-app.use((req, res, next) => { res.setTimeout(300000); next(); });
-
-app.listen(PORT, () => console.log('Playwright listo en puerto', PORT));
+server.keepAliveTimeout = 75_000;
+server.headersTimeout   = 90_000;
+server.requestTimeout   = 0;
