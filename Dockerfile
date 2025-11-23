@@ -1,16 +1,14 @@
 FROM mcr.microsoft.com/playwright:v1.47.0-jammy
 WORKDIR /app
 
-# 1) Capas cacheables primero
+# Copie package.json Y package-lock.json (obligatorio para npm ci)
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev && npx playwright install --with-deps
 
-# 2) Solo Chromium (evita ~2/3 del tiempo y del tamaño)
-RUN npx playwright install chromium --with-deps
-
-# 3) Copiar el resto del código
+# Copie el resto
 COPY . .
 
 ENV NODE_ENV=production
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 EXPOSE 8080
 CMD ["node", "PruebaLeerCedulas.js"]

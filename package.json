@@ -2,9 +2,9 @@
   "name": "cedulas-api",
   "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
+  "main": "PruebaLeerCedulas.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node PruebaLeerCedulas.js"
   },
   "dependencies": {
     "express": "^4.19.2",
