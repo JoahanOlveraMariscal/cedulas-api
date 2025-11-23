@@ -1,6 +1,6 @@
 // package.json: { "type":"module", "dependencies": { "playwright":"^1.47.0", "express":"^4" } }
 import express from 'express';
-import { firefox } from 'playwright';
+import { chromium, firefox } from 'playwright';
 
 const app = express();
 app.use(express.json());
@@ -21,6 +21,10 @@ const LAUNCH_ARGS = [
 
 // ======================= Navegador (pool simple) =======================
 const browserP = firefox.launch({ headless: true, args: LAUNCH_ARGS }); // una sola instancia
+
+async function launchBrowser() {
+  return firefox.launch({ headless: true, args: LAUNCH_ARGS });
+}
 
 async function newPage() {
   const browser = await browserP;
