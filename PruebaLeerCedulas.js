@@ -3,6 +3,9 @@
 
 import express from 'express';
 import { chromium } from 'playwright';
+import dns from 'node:dns/promises';
+import net from 'node:net';
+import tls from 'node:tls';
 
 const app  = express();
 app.use(express.json({ limit: '1mb' }));
@@ -159,6 +162,52 @@ async function collectRows(page) {
   return [];
 }
 
+async function tcpProbe(host, port = 443, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ host, port, timeout: timeoutMs });
+    const t0 = Date.now();
+    let done = false;
+    const finish = (ok, extra = {}) => {
+      if (done) return;
+      done = true;
+      try { sock.destroy(); } catch {}
+      resolve({ ok, ms: Date.now() - t0, ...extra });
+    };
+    sock.on('connect', () => finish(true));
+    sock.on('timeout', () => finish(false, { error: 'TCP_TIMEOUT' }));
+    sock.on('error', (e) => finish(false, { error: String(e?.code || e?.message || e) }));
+  });
+}
+
+async function tlsProbe(host, port = 443, timeoutMs = 12000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const socket = tls.connect({
+      host, port, servername: host, rejectUnauthorized: true,
+      timeout: timeoutMs,
+    }, () => {
+      const peer = socket.getPeerCertificate?.() || {};
+      resolve({
+        ok: true,
+        ms: Date.now() - t0,
+        alpn: socket.alpnProtocol || null,
+        authorized: socket.authorized,
+        cipher: socket.getCipher?.() || null,
+        peerCN: peer.subject?.CN || null,
+      });
+      socket.destroy();
+    });
+    socket.on('error', (e) => {
+      resolve({ ok: false, error: String(e?.code || e?.message || e) });
+      socket.destroy();
+    });
+    socket.setTimeout(timeoutMs, () => {
+      resolve({ ok: false, error: 'TLS_TIMEOUT' });
+      socket.destroy();
+    });
+  });
+}
+
 // ======================= Navegación robusta =======================
 async function navigateAndWait(page, url) {
   await page.goto(url, { timeout: NAV_TIMEOUT_MS }).catch(() => {});
@@ -180,13 +229,47 @@ app.get('/diag/httpbin', async (_req, res) => {
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-app.get('/diag/fetch', async (req, res) => {
-  const url = req.query.url || 'https://cedulaprofesional.sep.gob.mx/';
+// ---- endpoint: diagnóstico integral del host objetivo
+app.get('/diag/sep', async (req, res) => {
+  const host = (req.query.host || 'cedulaprofesional.sep.gob.mx').toString();
+  const url  = `https://${host}/`;
   try {
-    const r = await fetch(url, { redirect: 'manual' });
+    const lookup = await dns.lookup(host).catch(e => ({ error: String(e?.code || e?.message || e) }));
+    const ip = lookup?.address || null;
+
+    const tcp = ip ? await tcpProbe(ip, 443, 10000) : { ok: false, error: 'NO_DNS' };
+    const tlsR = ip && tcp.ok ? await tlsProbe(host, 443, 12000) : { ok: false, error: 'SKIP_TLS' };
+
+    // HTTP HEAD simple (sin Playwright) para ver si el proxy/CDN responde
+    let httpHead = { ok: false, status: null, error: null };
+    try {
+      const r = await fetch(url, { method: 'HEAD', redirect: 'manual', cache: 'no-store' });
+      httpHead = { ok: r.ok, status: r.status, headers: Object.fromEntries(r.headers.entries()) };
+    } catch (e) {
+      httpHead = { ok: false, error: String(e?.cause?.code || e?.message || e) };
+    }
+
+    res.json({ ok: true, host, ip, dns: lookup, tcp, tls: tlsR, httpHead });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ---- endpoint: fetch genérico con trazas de error (mejora de /diag/fetch)
+app.get('/diag/fetch', async (req, res) => {
+  const url = (req.query.url || 'https://cedulaprofesional.sep.gob.mx/').toString();
+  try {
+    const r = await fetch(url, { redirect: 'manual', cache: 'no-store' });
     res.json({ ok: true, url, status: r.status, headers: Object.fromEntries(r.headers.entries()) });
   } catch (e) {
-    res.status(500).json({ ok: false, url, error: String(e) });
+    res.status(500).json({
+      ok: false, url,
+      name: e?.name || null,
+      code: e?.cause?.code || null,
+      syscall: e?.cause?.syscall || null,
+      hostname: e?.cause?.hostname || null,
+      message: e?.message || String(e),
+    });
   }
 });
 
