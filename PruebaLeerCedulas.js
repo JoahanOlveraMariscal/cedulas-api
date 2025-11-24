@@ -208,6 +208,16 @@ app.get('/diag/sep', async (req,res)=>{
     res.json({ ok:true, host, ip, dns:lookup, tcp, tls:tlsR, httpHead });
   }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
 });
+
+app.get('/diag/sep-pw', async (_req,res) => {
+  const { context } = await newPage();
+  try {
+    const r = await context.request.head('https://cedulaprofesional.sep.gob.mx/', { timeout: 15000 });
+    res.json({ ok: r.ok(), status: r.status() });
+  } catch(e) { res.status(500).json({ ok:false, error:String(e) }); }
+  finally { await context.close(); }
+});
+
 app.get('/inspect-campos', async (_req,res)=>{
   const { context, page } = await newPage();
   try{
