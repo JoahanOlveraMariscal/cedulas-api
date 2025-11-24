@@ -1,4 +1,4 @@
-// PruebaLeerCedulas.js  (ESM puro)
+// PruebaLeerCedulas.js  (ESM)
 // package.json: { "type":"module", "dependencies": { "playwright":"^1.47.0", "express":"^4" } }
 
 import express from 'express';
@@ -7,8 +7,8 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import tls from 'node:tls';
 
-const app  = express();
-app.use(express.json({ limit: '1mb' }));
+const app = express();
+app.use(express.json({ limit: '1mb', strict: true }));
 app.set('trust proxy', 1);
 
 // ===== ENV =====
@@ -19,21 +19,35 @@ const PORT           = Number(process.env.PORT || 8080);
 
 const proxy = PROXY_URL ? { server: PROXY_URL, username: PROXY_USER, password: PROXY_PASS } : undefined;
 const LAUNCH_ARGS = [
-  '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-  '--single-process','--no-zygote','--disable-gpu','--disable-web-security',
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--disable-web-security',
   '--window-size=1280,900',
 ];
 
-// ===== Navegador (pool simple) =====
+// ===== Helpers: wrapper y guards =====
+function asyncHandler(fn){
+  return (req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
+}
+function methodGuard(method){
+  return (req,res,next)=>{
+    if (req.method !== method) return res.status(405).json({ ok:false, error:'Method Not Allowed' });
+    next();
+  };
+}
+
+// ===== Navegador (singleton) =====
 let browserPromise = null;
-async function ensureBrowser() {
-  if (!browserPromise) {
+async function ensureBrowser(){
+  if (!browserPromise){
     browserPromise = chromium.launch({ headless: true, args: LAUNCH_ARGS, proxy });
   }
   return browserPromise;
 }
 
-async function newPage() {
+async function newPage(){
   const browser = await ensureBrowser();
   const context = await browser.newContext({
     locale: 'es-MX',
@@ -46,6 +60,7 @@ async function newPage() {
   page.setDefaultTimeout(SEL_TIMEOUT_MS);
   page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
 
+  // Evitar descargas pesadas
   await page.route('**/*', r => {
     const url = r.request().url();
     if (/\.(mp4|avi|m3u8|webm|mov|woff2?|ttf|otf)$/i.test(url)) return r.abort();
@@ -56,11 +71,11 @@ async function newPage() {
 }
 
 // ===== Utilidades multi-frame =====
-async function waitAnySelectorInAnyFrame(page, selectors, timeoutMs) {
+async function waitAnySelectorInAnyFrame(page, selectors, timeoutMs){
   const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    for (const f of page.frames()) {
-      for (const sel of selectors) {
+  while (Date.now() - t0 < timeoutMs){
+    for (const f of page.frames()){
+      for (const sel of selectors){
         const loc = f.locator(sel);
         try { if (await loc.first().isVisible({ timeout: 250 })) return true; } catch {}
       }
@@ -69,63 +84,63 @@ async function waitAnySelectorInAnyFrame(page, selectors, timeoutMs) {
   }
   return false;
 }
-async function getLocatorInAnyFrameByLabel(page, labelRegex) {
-  for (const f of page.frames()) {
+async function getLocatorInAnyFrameByLabel(page, labelRegex){
+  for (const f of page.frames()){
     const loc = f.getByLabel(labelRegex);
     try { if (await loc.first().isVisible({ timeout: 300 })) return loc.first(); } catch {}
   }
   return null;
 }
-async function getLocatorInAnyFrame(page, css) {
-  for (const f of page.frames()) {
+async function getLocatorInAnyFrame(page, css){
+  for (const f of page.frames()){
     const loc = f.locator(css);
     try { if (await loc.first().isVisible({ timeout: 300 })) return loc.first(); } catch {}
   }
   return null;
 }
-async function fillAny(page, labelText, css, value) {
+async function fillAny(page, labelText, css, value){
   if (!value) return false;
   const byLabel = await getLocatorInAnyFrameByLabel(page, new RegExp(labelText, 'i'));
-  if (byLabel) { await byLabel.fill(value); return true; }
+  if (byLabel){ await byLabel.fill(value); return true; }
   const byCss = await getLocatorInAnyFrame(page, css);
-  if (byCss) { await byCss.fill(value); return true; }
+  if (byCss){ await byCss.fill(value); return true; }
   return false;
 }
-async function clickBuscar(page) {
-  for (const f of page.frames()) {
+async function clickBuscar(page){
+  for (const f of page.frames()){
     const btn = f.getByRole('button', { name: /buscar/i });
     try { if (await btn.isVisible({ timeout: 500 })) { await btn.click(); return true; } } catch {}
   }
-  for (const f of page.frames()) {
+  for (const f of page.frames()){
     const btn = f.locator('button:has-text("Buscar")');
     try { if (await btn.first().isVisible({ timeout: 500 })) { await btn.first().click(); return true; } } catch {}
   }
   return false;
 }
-async function waitRowsInAnyFrame(page, timeoutMs) {
+async function waitRowsInAnyFrame(page, timeoutMs){
   const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    for (const f of page.frames()) {
+  while (Date.now() - t0 < timeoutMs){
+    for (const f of page.frames()){
       if (await f.locator('table tbody tr').count() > 0) return true;
     }
     await page.waitForTimeout(250);
   }
   throw new Error('Timeout esperando filas de resultados.');
 }
-async function waitTextInAnyFrame(page, regex, timeoutMs) {
+async function waitTextInAnyFrame(page, regex, timeoutMs){
   const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    for (const f of page.frames()) {
+  while (Date.now() - t0 < timeoutMs){
+    for (const f of page.frames()){
       try { if (await f.getByText(regex).first().isVisible({ timeout: 250 })) return true; } catch {}
     }
     await page.waitForTimeout(250);
   }
   return false;
 }
-async function collectRows(page) {
-  for (const f of page.frames()) {
+async function collectRows(page){
+  for (const f of page.frames()){
     const n = await f.locator('table tbody tr').count();
-    if (n > 0) {
+    if (n > 0){
       return f.$$eval('table tbody tr', trs =>
         trs.map(r => {
           const t = Array.from(r.querySelectorAll('td')).map(td => (td.textContent || '').trim());
@@ -149,7 +164,7 @@ async function collectRows(page) {
 }
 
 // ===== Probes red (diag) =====
-async function tcpProbe(host, port = 443, timeoutMs = 10000) {
+async function tcpProbe(host, port = 443, timeoutMs = 10000){
   return new Promise(resolve => {
     const sock = net.connect({ host, port, timeout: timeoutMs });
     const t0 = Date.now(); let done = false;
@@ -159,7 +174,7 @@ async function tcpProbe(host, port = 443, timeoutMs = 10000) {
     sock.on('error', e => finish(false, { error: String(e?.code || e?.message || e) }));
   });
 }
-async function tlsProbe(host, port = 443, timeoutMs = 12000) {
+async function tlsProbe(host, port = 443, timeoutMs = 12000){
   return new Promise(resolve => {
     const t0 = Date.now();
     const s = tls.connect({ host, port, servername: host, rejectUnauthorized: true, timeout: timeoutMs }, () => {
@@ -173,7 +188,7 @@ async function tlsProbe(host, port = 443, timeoutMs = 12000) {
 }
 
 // ===== Navegación robusta =====
-async function navigateAndWait(page, url) {
+async function navigateAndWait(page, url){
   await page.goto(url, { timeout: NAV_TIMEOUT_MS }).catch(() => {});
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT_MS }).catch(() => {});
   const ok = await waitAnySelectorInAnyFrame(page, [
@@ -188,37 +203,36 @@ async function navigateAndWait(page, url) {
 // ===== Endpoints =====
 app.get('/', (_req,res)=>res.json({ ok:true, msg:'cedulas-api up' }));
 app.get('/diag/ping', (_req,res)=>res.json({ ok:true, pid:process.pid, ts:Date.now() }));
-app.get('/diag/httpbin', async (_req,res) => {
-  try { const r = await fetch('https://httpbin.org/get', { cache:'no-store' }); res.json({ ok:r.ok, status:r.status }); }
-  catch(e){ res.status(500).json({ ok:false, error:e.message }); }
-});
-app.get('/diag/sep', async (req,res)=>{
+
+app.get('/diag/httpbin', asyncHandler(async (_req,res) => {
+  const r = await fetch('https://httpbin.org/get', { cache:'no-store' });
+  res.json({ ok:r.ok, status:r.status });
+}));
+
+app.get('/diag/sep', asyncHandler(async (req,res)=>{
   const host = String(req.query.host || 'cedulaprofesional.sep.gob.mx');
   const url  = `https://${host}/`;
+  const lookup = await dns.lookup(host).catch(e=>({ error:String(e?.code||e?.message||e) }));
+  const ip = lookup?.address || null;
+  const tcp = ip ? await tcpProbe(ip,443,10000) : { ok:false, error:'NO_DNS' };
+  const tlsR= ip && tcp.ok ? await tlsProbe(host,443,12000) : { ok:false, error:'SKIP_TLS' };
+  let httpHead={ ok:false, status:null, error:null };
   try{
-    const lookup = await dns.lookup(host).catch(e=>({ error:String(e?.code||e?.message||e) }));
-    const ip = lookup?.address || null;
-    const tcp = ip ? await tcpProbe(ip,443,10000) : { ok:false, error:'NO_DNS' };
-    const tlsR= ip && tcp.ok ? await tlsProbe(host,443,12000) : { ok:false, error:'SKIP_TLS' };
-    let httpHead={ ok:false, status:null, error:null };
-    try{
-      const r = await fetch(url, { method:'HEAD', redirect:'manual', cache:'no-store' });
-      httpHead = { ok:r.ok, status:r.status, headers:Object.fromEntries(r.headers.entries()) };
-    }catch(e){ httpHead = { ok:false, error:String(e?.cause?.code||e?.message||e) }; }
-    res.json({ ok:true, host, ip, dns:lookup, tcp, tls:tlsR, httpHead });
-  }catch(e){ res.status(500).json({ ok:false, error:String(e) }); }
-});
+    const r = await fetch(url, { method:'HEAD', redirect:'manual', cache:'no-store' });
+    httpHead = { ok:r.ok, status:r.status, headers:Object.fromEntries(r.headers.entries()) };
+  }catch(e){ httpHead = { ok:false, error:String(e?.cause?.code||e?.message||e) }; }
+  res.json({ ok:true, host, ip, dns:lookup, tcp, tls:tlsR, httpHead });
+}));
 
-app.get('/diag/sep-pw', async (_req,res) => {
+app.get('/diag/sep-pw', asyncHandler(async (_req,res) => {
   const { context } = await newPage();
   try {
     const r = await context.request.head('https://cedulaprofesional.sep.gob.mx/', { timeout: 15000 });
     res.json({ ok: r.ok(), status: r.status() });
-  } catch(e) { res.status(500).json({ ok:false, error:String(e) }); }
-  finally { await context.close(); }
-});
+  } finally { try{ await context.close(); }catch{} }
+}));
 
-app.get('/inspect-campos', async (_req,res)=>{
+app.get('/inspect-campos', asyncHandler(async (_req,res)=>{
   const { context, page } = await newPage();
   try{
     await navigateAndWait(page,'https://cedulaprofesional.sep.gob.mx/');
@@ -232,10 +246,10 @@ app.get('/inspect-campos', async (_req,res)=>{
       frames.push({ url:f.url(), inputs });
     }
     res.json({ ok:true, frames });
-  }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
-  finally{ await context.close(); }
-});
-app.get('/diag/snap', async (_req,res)=>{
+  } finally { try{ await context.close(); }catch{} }
+}));
+
+app.get('/diag/snap', asyncHandler(async (_req,res)=>{
   const { context, page } = await newPage();
   try{
     await page.goto('https://cedulaprofesional.sep.gob.mx/', { timeout:NAV_TIMEOUT_MS }).catch(()=>{});
@@ -243,13 +257,22 @@ app.get('/diag/snap', async (_req,res)=>{
     const png  = await page.screenshot({ fullPage:true }).catch(()=>null);
     const html = await page.content().catch(()=> '');
     const frames = page.frames().map(f=>({ url:f.url() }));
-    res.json({ ok:true, title:await page.title().catch(()=>null), url:page.url(), htmlPreview:(html||'').slice(0,4000), frames, screenshotBase64: png?Buffer.from(png).toString('base64'):null });
-  }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
-  finally{ await context.close(); }
-});
-app.post('/consulta-cedula', async (req,res)=>{
+    res.json({
+      ok:true,
+      title:await page.title().catch(()=>null),
+      url:page.url(),
+      htmlPreview:(html||'').slice(0,4000),
+      frames,
+      screenshotBase64: png?Buffer.from(png).toString('base64'):null
+    });
+  } finally { try{ await context.close(); }catch{} }
+}));
+
+// Guardar 405 para POST específico
+app.all('/consulta-cedula', methodGuard('POST'));
+app.post('/consulta-cedula', asyncHandler(async (req,res)=>{
   const { nombre, paterno, materno, curp } = req.body || {};
-  if(!nombre && !curp) return res.status(400).json({ error:'Proporcione al menos {nombre,paterno,materno} o {curp}.' });
+  if(!nombre && !curp) return res.status(400).json({ ok:false, error:'Proporcione al menos {nombre,paterno,materno} o {curp}.' });
 
   const { context, page } = await newPage();
   try{
@@ -262,7 +285,7 @@ app.post('/consulta-cedula', async (req,res)=>{
       await fillAny(page,'Segundo Apellido','input#segundoApellido, input[formcontrolname="segundoApellido"]',materno);
     }
     const clicked = await clickBuscar(page);
-    if(!clicked) throw new Error('No se pudo accionar el botón “Buscar”.');
+    if(!clicked) return res.status(500).json({ ok:false, error:'No se pudo accionar el botón “Buscar”.' });
 
     const got = await Promise.race([
       waitRowsInAnyFrame(page, 45000).then(()=>true).catch(()=>false),
@@ -281,8 +304,75 @@ app.post('/consulta-cedula', async (req,res)=>{
     const ultimoAnno = aniosNum.length ? Math.max(...aniosNum) : null;
 
     res.json({ ok:true, query:queryObj, coincidencias:total, resumen:{ total, primerRegistro, cedulas, universidades, entidades, aniosNum, ultimoAnno }, resultados });
-  }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
-  finally{ await context.close(); }
+  } finally { try{ await context.close(); }catch{} }
+}));
+
+// POST /consulta-curp  { curp: "XXXX..." }
+app.post('/consulta-curp', async (req, res) => {
+  const { curp } = req.body || {};
+  if (!curp) return res.status(400).json({ error: 'Falta {curp}.' });
+
+  const { context, page } = await newPage();
+  try {
+    await navigateAndWait(page, 'https://cedulaprofesional.sep.gob.mx/');
+
+    // Rellenar SOLO CURP (no tocar campos de nombre)
+    const okFill = await fillAny(page, 'CURP', 'input#curp, input[formcontrolname="curp"]', curp);
+    if (!okFill) throw new Error('No fue posible ubicar el campo CURP.');
+
+    const clicked = await clickBuscar(page);
+    if (!clicked) throw new Error('No se pudo accionar el botón “Buscar”.');
+
+    // Esperar filas o mensaje “sin resultados”
+    const got = await Promise.race([
+      waitRowsInAnyFrame(page, 45000).then(() => true).catch(() => false),
+      waitTextInAnyFrame(page, /sin resultados|no se encontraron/i, 45000).then(() => false).catch(() => false),
+    ]);
+
+    const queryObj = { curp };
+    if (!got) return res.json({ ok: true, query: queryObj, coincidencias: 0, resultados: [] });
+
+    // Si ya tiene collectAllPages, úselo para evitar paginación:
+    // const resultados = await collectAllPages(page, { maxPages: 10, delayMs: 400 });
+    const resultados = await collectRows(page);
+
+    const total = resultados.length;
+    const primerRegistro = resultados[0] || null;
+    const cedulas = resultados.map(r => r.cedula);
+    const universidades = Array.from(new Set(resultados.map(r => r.universidad).filter(Boolean)));
+    const entidades = Array.from(new Set(resultados.map(r => r.entidad).filter(Boolean)));
+    const aniosNum = resultados.map(r => Number(String(r.anno).replace(/[^\d]/g, ''))).filter(Number.isFinite);
+    const ultimoAnno = aniosNum.length ? Math.max(...aniosNum) : null;
+
+    res.json({
+      ok: true,
+      query: queryObj,
+      coincidencias: total,
+      resumen: { total, primerRegistro, cedulas, universidades, entidades, aniosNum, ultimoAnno },
+      resultados
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    await context.close();
+  }
+});
+
+// ===== 404 y manejo global de errores =====
+app.use((req,res)=>res.status(404).json({ ok:false, error:'Not Found' }));
+app.use((err, req, res, _next) => {
+  console.error('[RouteError]', err);
+  if (res.headersSent) return;
+  res.status(500).json({ ok:false, error: err?.message || 'Error interno' });
+});
+
+// ===== Manejadores de proceso =====
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+  // No finalizar el proceso; mantener vivo el servicio.
 });
 
 // ===== Arranque =====
